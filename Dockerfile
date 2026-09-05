@@ -1,36 +1,33 @@
 # ════════════════════════════════════════
 #  NASME GYM — PHP Backend Dockerfile
 #  Stack: PHP 8.2-FPM + Nginx (Alpine)
-#  Avoids Apache MPM conflicts entirely
 # ════════════════════════════════════════
 
 FROM php:8.2-fpm-alpine
 
-# ── Install nginx ──────────────────────
+# Install nginx
 RUN apk add --no-cache nginx
 
-# ── Install PHP extensions ─────────────
+# Install PHP MySQL extensions
 RUN docker-php-ext-install pdo pdo_mysql mysqli
 
-# ── Create required directories ────────
-RUN mkdir -p /run/nginx \
-    && mkdir -p /var/www/html
+# Create directories nginx needs
+RUN mkdir -p /run/nginx /var/log/nginx
 
-# ── Copy project files ─────────────────
+# Copy ALL project files into web root
 COPY . /var/www/html/
 
-# ── Copy nginx config ──────────────────
+# Copy nginx config
 COPY nginx.conf /etc/nginx/nginx.conf
 
-# ── File permissions ───────────────────
+# Set permissions
 RUN chown -R www-data:www-data /var/www/html/ \
     && chmod -R 755 /var/www/html/
 
-# ── Copy and set startup script ────────
+# Copy startup script
 COPY start.sh /start.sh
 RUN chmod +x /start.sh
 
-# Railway uses 8080 by default for web services
 EXPOSE 8080
 
 CMD ["/start.sh"]
