@@ -1,0 +1,19 @@
+# ════════════════════════════════════════
+#  NASME GYM — Backend .gitignore
+# ════════════════════════════════════════
+
+# Environment variables — NEVER push these
+.env
+.env.local
+.env.production
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Editor folders
+.vscode/
+.idea/
+
+# Logs
+*.log
