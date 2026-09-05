@@ -19,10 +19,8 @@ CREATE TABLE IF NOT EXISTS users (
 
 -- Seed: admin / admin123  |  staff / staff123
 INSERT IGNORE INTO users (username, password, full_name, role) VALUES
-  ('admin', '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi', 'Admin User',  'superadmin'),
-  ('staff', '$2y$10$TKh8H1.PFbQUX4x3Jj0oOeQ0zDl4XqR0KVv6VJhVfvGjZ0vPAqGe', 'Staff Member', 'staff');
--- Note: the hashes above are for "admin123" and "staff123" respectively (bcrypt cost 10)
--- Re-generate with: password_hash('admin123', PASSWORD_BCRYPT)
+  ('admin', '$2b$10$UUUQtcJHdC7KJ/PzCvE.5.XTcmRtA63pBDOfvoUsxqkjQuaZSMEcG', 'Admin User',  'superadmin'),
+  ('staff', '$2b$10$d7OlFMzMQRX0x4S3wOzUl./eluHKGn6RRb9056kNhkWbUMFmKFxz6', 'Staff Member', 'staff');
 
 -- ── MEMBERS ──────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS members (
