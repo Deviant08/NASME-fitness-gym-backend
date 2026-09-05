@@ -1,32 +1,36 @@
 # ════════════════════════════════════════
 #  NASME GYM — PHP Backend Dockerfile
-#  Fixed: removed duplicate MPM loading
+#  Stack: PHP 8.2-FPM + Nginx (Alpine)
+#  Avoids Apache MPM conflicts entirely
 # ════════════════════════════════════════
 
-FROM php:8.2-apache
+FROM php:8.2-fpm-alpine
 
-# Install MySQL PHP extensions
+# ── Install nginx ──────────────────────
+RUN apk add --no-cache nginx
+
+# ── Install PHP extensions ─────────────
 RUN docker-php-ext-install pdo pdo_mysql mysqli
 
-# Enable mod_rewrite for .htaccess support
-RUN a2enmod rewrite
+# ── Create required directories ────────
+RUN mkdir -p /run/nginx \
+    && mkdir -p /var/www/html
 
-# Copy all backend files into Apache's web root
+# ── Copy project files ─────────────────
 COPY . /var/www/html/
 
-# Set correct file permissions
+# ── Copy nginx config ──────────────────
+COPY nginx.conf /etc/nginx/nginx.conf
+
+# ── File permissions ───────────────────
 RUN chown -R www-data:www-data /var/www/html/ \
     && chmod -R 755 /var/www/html/
 
-# Allow .htaccess overrides in the web root
-RUN sed -i 's|AllowOverride None|AllowOverride All|g' \
-    /etc/apache2/apache2.conf
+# ── Copy and set startup script ────────
+COPY start.sh /start.sh
+RUN chmod +x /start.sh
 
-# Railway dynamically assigns a PORT — wire Apache to use it
-RUN sed -i 's/Listen 80/Listen ${PORT:-80}/' /etc/apache2/ports.conf \
-    && sed -i 's/<VirtualHost \*:80>/<VirtualHost *:${PORT:-80}>/' \
-    /etc/apache2/sites-enabled/000-default.conf
+# Railway uses 8080 by default for web services
+EXPOSE 8080
 
-EXPOSE 80
-
-CMD ["apache2-foreground"]
+CMD ["/start.sh"]
