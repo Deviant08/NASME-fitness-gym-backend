@@ -1,22 +1,20 @@
-# ════════════════════════════════════════
+# ════════════════════════════════
 #  NASME GYM — Apache Configuration
 #  File: .htaccess (backend root)
-# ════════════════════════════════════════
+#  Used on XAMPP. Railway uses nginx.conf.
+# ════════════════════════════════
 
 Options -Indexes
 RewriteEngine On
 
-# ── CORS headers for all API responses ──
-Header always set Access-Control-Allow-Origin "*"
-Header always set Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
-Header always set Access-Control-Allow-Headers "Content-Type, Authorization"
+# Do NOT use Access-Control-Allow-Origin: *
+# Credentialed fetch() from Vercel requires a real origin
+# plus Access-Control-Allow-Credentials (set in api/helpers.php).
 
-# ── Handle OPTIONS preflight requests ──
+# Handle OPTIONS preflight
 RewriteCond %{REQUEST_METHOD} OPTIONS
-RewriteRule ^(.*)$ $1 [R=200,L]
+RewriteRule ^(.*)$ $1 [R=204,L]
 
-# ── Block direct access to helpers.php ──
+# Block direct access to helpers.php and db.php
 RewriteRule ^api/helpers\.php$ - [F,L]
-
-# ── Block direct access to db.php ──
 RewriteRule ^db\.php$ - [F,L]

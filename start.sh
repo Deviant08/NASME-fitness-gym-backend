@@ -1,19 +1,21 @@
 #!/bin/sh
-# ════════════════════════════════════════
+# ════════════════════════════════
 #  NASME GYM — Container Startup Script
-# ════════════════════════════════════════
+# ════════════════════════════════
+
+set -e
 
 echo "=== Files in web root ==="
 ls -la /var/www/html/
 echo "=== API folder ==="
 ls -la /var/www/html/api/ 2>/dev/null || echo "api/ folder not found!"
 
-# Use Railway PORT if set, otherwise default to 8080
-NGINX_PORT=${PORT:-8080}
-echo "Using PORT: $NGINX_PORT"
-
-# Replace the placeholder in nginx.conf with the actual port number
-sed -i "s/NGINX_PORT/$NGINX_PORT/" /etc/nginx/nginx.conf
+# Railway injects PORT. Nginx cannot read env vars on its own.
+PORT="${PORT:-8080}"
+echo "Using PORT: $PORT"
+sed -i "s/listen[[:space:]]*[^;]*;/listen $PORT;/" /etc/nginx/nginx.conf
+echo "=== nginx listen line ==="
+grep listen /etc/nginx/nginx.conf || true
 
 echo "Starting PHP-FPM..."
 php-fpm -D
@@ -21,5 +23,5 @@ php-fpm -D
 echo "Waiting for PHP-FPM..."
 sleep 2
 
-echo "Starting Nginx on port $NGINX_PORT..."
+echo "Starting Nginx on port $PORT..."
 nginx -g "daemon off;"

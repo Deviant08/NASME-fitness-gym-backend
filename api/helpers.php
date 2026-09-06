@@ -1,26 +1,64 @@
 <?php
-/* ════════════════════════════════════════
+/* ════════════════════════════════
    NASME GYM — Shared API Helpers
    File: api/helpers.php
    Required by every API file.
    Never accessed directly by the browser.
-════════════════════════════════════════ */
+════════════════════════════════ */
 
 require_once __DIR__ . '/../db.php';
 
-/* ── Set JSON headers ─────────────────────────────── */
+/* ── CORS for Vercel frontend + local dev ─────────── */
+function corsOrigin(): ?string {
+    $origin  = $_SERVER['HTTP_ORIGIN'] ?? '';
+    $allowed = [
+        'https://nasme-fitness-gym-sigma.vercel.app',
+        'http://localhost:5500',
+        'http://127.0.0.1:5500',
+        'http://localhost:3000',
+        'http://127.0.0.1:3000',
+        'http://localhost',
+        'http://127.0.0.1',
+    ];
+    if (in_array($origin, $allowed, true)) {
+        return $origin;
+    }
+    /* Vercel preview deployments for this project */
+    if (preg_match('#^https://nasme-fitness-gym[a-z0-9-]*\\.vercel\\.app$#', $origin)) {
+        return $origin;
+    }
+    return null;
+}
+
 header('Content-Type: application/json');
-header('Access-Control-Allow-Origin: https://nasme-fitness-gym-sigma.vercel.app');
+header('Vary: Origin');
+
+$origin = corsOrigin();
+if ($origin) {
+    header("Access-Control-Allow-Origin: $origin");
+    header('Access-Control-Allow-Credentials: true');
+}
 header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Authorization');
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
-    http_response_code(200);
+    http_response_code(204);
     exit;
 }
 
-/* ── Start session once ────────────────────────────── */
+/* ── Session cookie must work Vercel → Railway (cross-site) ── */
 if (session_status() === PHP_SESSION_NONE) {
+    $secure = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+        || (($_SERVER['SERVER_PORT'] ?? '') === '443')
+        || (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https');
+
+    session_set_cookie_params([
+        'lifetime' => 0,
+        'path'     => '/',
+        'secure'   => $secure,
+        'httponly' => true,
+        'samesite' => $secure ? 'None' : 'Lax',
+    ]);
     session_start();
 }
 
