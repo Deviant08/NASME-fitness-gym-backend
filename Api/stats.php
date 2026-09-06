@@ -11,6 +11,8 @@ require_once __DIR__ . '/helpers.php';
 requireAuth();
 $db = getDB();
 
+// No problems here
+
 if (method() !== 'GET') {
     respond(['error' => 'Method not allowed.'], 405);
 }
