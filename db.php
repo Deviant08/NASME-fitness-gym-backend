@@ -1,11 +1,4 @@
 <?php
-/* ════════════════════════════════════════
-   NASME GYM — Database Connection
-   File: db.php
-   Reads Railway's exact variable names.
-════════════════════════════════════════ */
-
-// ── Load .env file for local XAMPP development ──
 $envFile = __DIR__ . '/.env';
 if (file_exists($envFile)) {
     $lines = file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
@@ -14,7 +7,7 @@ if (file_exists($envFile)) {
         if (!str_contains($line, '=')) continue;
         [$key, $value] = explode('=', $line, 2);
         $key   = trim($key);
-        $value = trim($value);
+        $value = trim($value, " \t\"'");
         if (!array_key_exists($key, $_ENV)) {
             $_ENV[$key] = $value;
             putenv("$key=$value");
@@ -22,28 +15,26 @@ if (file_exists($envFile)) {
     }
 }
 
-// ── Railway variable names ──────────────────────
-// MYSQLHOST     → the private domain Railway assigns
-// MYSQLUSER     → root
-// MYSQLPASSWORD → the generated password
-// MYSQLDATABASE → railway
-// MYSQLPORT     → 3306
-define('DB_HOST', getenv('MYSQLHOST')     ?: 'localhost');
-define('DB_USER', getenv('MYSQLUSER')     ?: 'root');
-define('DB_PASS', getenv('MYSQLPASSWORD') ?: '');
-define('DB_NAME', getenv('MYSQLDATABASE') ?: 'nasme_gym');
-define('DB_PORT', getenv('MYSQLPORT')     ?: '3306');
+function envFirst(array $keys, string $fallback = ''): string {
+    foreach ($keys as $key) {
+        $value = getenv($key);
+        if ($value !== false && $value !== '') return $value;
+        if (!empty($_ENV[$key])) return (string)$_ENV[$key];
+    }
+    return $fallback;
+}
 
-// ── PDO singleton connection ────────────────────
+define('DB_HOST', envFirst(['MYSQLHOST', 'DB_HOST', 'MYSQL_HOST'], 'localhost'));
+define('DB_USER', envFirst(['MYSQLUSER', 'DB_USER', 'MYSQL_USER'], 'root'));
+define('DB_PASS', envFirst(['MYSQLPASSWORD', 'DB_PASS', 'MYSQL_PASSWORD'], ''));
+define('DB_NAME', envFirst(['MYSQLDATABASE', 'DB_NAME', 'MYSQL_DATABASE'], 'nasme_gym'));
+define('DB_PORT', envFirst(['MYSQLPORT', 'DB_PORT', 'MYSQL_PORT'], '3306'));
+
 function getDB(): PDO {
     static $pdo = null;
-
     if ($pdo === null) {
         try {
-            $dsn = sprintf(
-                'mysql:host=%s;port=%s;dbname=%s;charset=utf8mb4',
-                DB_HOST, DB_PORT, DB_NAME
-            );
+            $dsn = sprintf('mysql:host=%s;port=%s;dbname=%s;charset=utf8mb4', DB_HOST, DB_PORT, DB_NAME);
             $pdo = new PDO($dsn, DB_USER, DB_PASS, [
                 PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
                 PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
@@ -54,11 +45,10 @@ function getDB(): PDO {
             header('Content-Type: application/json');
             echo json_encode([
                 'error' => 'Database connection failed.',
-                'hint'  => $e->getMessage()
+                'hint'  => 'Check MYSQLHOST / DB_HOST and related environment variables.',
             ]);
             exit;
         }
     }
-
     return $pdo;
 }
