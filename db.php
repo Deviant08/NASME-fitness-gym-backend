@@ -24,31 +24,60 @@ function envFirst(array $keys, string $fallback = ''): string {
     return $fallback;
 }
 
-define('DB_HOST', envFirst(['MYSQLHOST', 'DB_HOST', 'MYSQL_HOST'], 'localhost'));
-define('DB_USER', envFirst(['MYSQLUSER', 'DB_USER', 'MYSQL_USER'], 'root'));
-define('DB_PASS', envFirst(['MYSQLPASSWORD', 'DB_PASS', 'MYSQL_PASSWORD'], ''));
-define('DB_NAME', envFirst(['MYSQLDATABASE', 'DB_NAME', 'MYSQL_DATABASE'], 'nasme_gym'));
-define('DB_PORT', envFirst(['MYSQLPORT', 'DB_PORT', 'MYSQL_PORT'], '3306'));
+function parseMysqlUrl(string $url): ?array {
+    $parts = parse_url($url);
+    if (!$parts || empty($parts['host'])) return null;
+    return [
+        'host' => $parts['host'],
+        'port' => (string)($parts['port'] ?? '3306'),
+        'user' => urldecode($parts['user'] ?? ''),
+        'pass' => urldecode($parts['pass'] ?? ''),
+        'name' => ltrim($parts['path'] ?? '', '/'),
+    ];
+}
+
+function dbConfig(): array {
+    $url = envFirst(['MYSQL_URL', 'DATABASE_URL', 'MYSQL_PRIVATE_URL', 'MYSQL_PUBLIC_URL']);
+    $fromUrl = $url !== '' ? parseMysqlUrl($url) : null;
+    return [
+        'host' => envFirst(['MYSQLHOST', 'DB_HOST', 'MYSQL_HOST'], $fromUrl['host'] ?? 'localhost'),
+        'port' => envFirst(['MYSQLPORT', 'DB_PORT', 'MYSQL_PORT'], $fromUrl['port'] ?? '3306'),
+        'user' => envFirst(['MYSQLUSER', 'DB_USER', 'MYSQL_USER'], $fromUrl['user'] ?? 'root'),
+        'pass' => envFirst(['MYSQLPASSWORD', 'DB_PASS', 'MYSQL_PASSWORD'], $fromUrl['pass'] ?? ''),
+        'name' => envFirst(['MYSQLDATABASE', 'DB_NAME', 'MYSQL_DATABASE'], $fromUrl['name'] ?? 'railway'),
+    ];
+}
+
+function dbEnvReport(): array {
+    $keys = ['MYSQLHOST','MYSQLPORT','MYSQLUSER','MYSQLPASSWORD','MYSQLDATABASE','MYSQL_URL','DATABASE_URL','MYSQL_PRIVATE_URL','DB_HOST','DB_USER','DB_NAME'];
+    $present = [];
+    foreach ($keys as $key) {
+        $value = envFirst([$key]);
+        $present[$key] = $value !== '';
+    }
+    $cfg = dbConfig();
+    return [
+        'vars_present' => $present,
+        'using' => [
+            'host' => $cfg['host'],
+            'port' => $cfg['port'],
+            'user' => $cfg['user'],
+            'name' => $cfg['name'],
+            'password_set' => $cfg['pass'] !== '',
+        ],
+    ];
+}
 
 function getDB(): PDO {
     static $pdo = null;
     if ($pdo === null) {
-        try {
-            $dsn = sprintf('mysql:host=%s;port=%s;dbname=%s;charset=utf8mb4', DB_HOST, DB_PORT, DB_NAME);
-            $pdo = new PDO($dsn, DB_USER, DB_PASS, [
-                PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
-                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-                PDO::ATTR_EMULATE_PREPARES   => false,
-            ]);
-        } catch (PDOException $e) {
-            http_response_code(500);
-            header('Content-Type: application/json');
-            echo json_encode([
-                'error' => 'Database connection failed.',
-                'hint'  => 'Check MYSQLHOST / DB_HOST and related environment variables.',
-            ]);
-            exit;
-        }
+        $cfg = dbConfig();
+        $dsn = sprintf('mysql:host=%s;port=%s;dbname=%s;charset=utf8mb4', $cfg['host'], $cfg['port'], $cfg['name']);
+        $pdo = new PDO($dsn, $cfg['user'], $cfg['pass'], [
+            PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
+            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+            PDO::ATTR_EMULATE_PREPARES   => false,
+        ]);
     }
     return $pdo;
 }
