@@ -1,17 +1,11 @@
 #!/bin/sh
-echo "=== Files in web root ==="
-ls -la /var/www/html/ || true
-echo "=== API folder ==="
-ls -la /var/www/html/api/ || echo "api/ folder not found!"
-
+set -eu
 PORT="${PORT:-8080}"
-echo "Using PORT: $PORT"
-sed -i "s/listen[[:space:]]*[^;]*;/listen 0.0.0.0:$PORT;/" /etc/nginx/nginx.conf
-echo "=== nginx listen line ==="
-grep listen /etc/nginx/nginx.conf || true
-
-echo "Starting PHP-FPM..."
-php-fpm -D
-sleep 2
-echo "Starting Nginx on 0.0.0.0:$PORT..."
-exec nginx -g "daemon off;"
+cd /var/www/html
+echo "=== web root ==="
+ls -la
+echo "=== api ==="
+ls -la api || echo "api folder missing"
+echo "PHP version: $(php -v | head -n 1)"
+echo "Starting PHP server on 0.0.0.0:${PORT}"
+exec php -S "0.0.0.0:${PORT}" -t /var/www/html /var/www/html/router.php
