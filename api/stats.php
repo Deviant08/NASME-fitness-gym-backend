@@ -3,7 +3,7 @@
    NASME GYM — Dashboard Stats API
    File: api/stats.php
 
-   GET api/stats.php   → all dashboard summary numbers
+   GET api/stats.php   → dashboard summary + recent activity
 ════════════════════════════════════════ */
 
 require_once __DIR__ . '/helpers.php';
@@ -11,13 +11,26 @@ require_once __DIR__ . '/helpers.php';
 requireAuth();
 $db = getDB();
 
-// No problems here
-
 if (method() !== 'GET') {
     respond(['error' => 'Method not allowed.'], 405);
 }
 
-/* Run all counts in one shot */
+/* Recent activity: who did what, and when */
+$activityStmt = $db->query("
+    SELECT
+        a.id,
+        a.action,
+        a.color_tag,
+        a.logged_at,
+        COALESCE(u.full_name, u.username, 'System') AS actor,
+        u.role AS actor_role
+    FROM audit_log a
+    LEFT JOIN users u ON a.user_id = u.id
+    ORDER BY a.logged_at DESC
+    LIMIT 15
+");
+$activity = $activityStmt ? $activityStmt->fetchAll() : [];
+
 respond([
     'data' => [
 
@@ -64,7 +77,7 @@ respond([
             "SELECT COUNT(*) FROM equipment WHERE status = 'Under Maintenance'"
         )->fetchColumn(),
 
-        /* ── Store ── */
+        /* ── Store (kept for compatibility) ── */
         'total_products'   => (int)$db->query(
             'SELECT COUNT(*) FROM products'
         )->fetchColumn(),
@@ -87,5 +100,8 @@ respond([
              WHERE MONTH(ordered_at) = MONTH(NOW())
                AND YEAR(ordered_at)  = YEAR(NOW())"
         )->fetchColumn(),
-    ]
+
+        /* ── Recent activity ── */
+        'activity' => $activity,
+    ],
 ]);
