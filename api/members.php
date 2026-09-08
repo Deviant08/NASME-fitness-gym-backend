@@ -60,14 +60,31 @@ function archiveMember(PDO $db, array $user, int $id, string $reason): void {
     respond(['success' => true]);
 }
 
+function restoreMember(PDO $db, array $user, int $id): void {
+    $check = $db->prepare('SELECT * FROM members WHERE id = ?');
+    $check->execute([$id]);
+    $current = $check->fetch();
+    if (!$current) respond(['error' => 'Member not found.'], 404);
+    if ($current['status'] !== 'Archived') respond(['error' => 'This member is not archived.'], 409);
+    $db->prepare('UPDATE members SET status = "Active", archive_reason = NULL, archived_at = NULL, updated_at = NOW() WHERE id = ?')
+       ->execute([$id]);
+    logAction($db, $user['id'], "Member {$current['member_code']} ({$current['full_name']}) restored to Active", 'success');
+    respond(['success' => true]);
+}
+
 if ($m === 'GET' && !$id) {
     $q      = '%' . ($_GET['q'] ?? '') . '%';
     $plan   = $_GET['plan']   ?? '';
     $status = $_GET['status'] ?? '';
     $sql    = 'SELECT * FROM members WHERE (full_name LIKE ? OR member_code LIKE ? OR phone LIKE ?)';
     $params = [$q, $q, $q];
-    if ($status) { $sql .= ' AND status = ?'; $params[] = $status; }
-    else { $sql .= ' AND status <> "Archived"'; }
+    if ($status && strtolower($status) !== 'all') {
+        $sql .= ' AND status = ?';
+        $params[] = $status;
+    } elseif (!$status) {
+        $sql .= ' AND status <> "Archived"';
+    }
+    // status=all → no status filter
     if ($plan) { $sql .= ' AND plan = ?'; $params[] = $plan; }
     $sql .= ' ORDER BY created_at DESC';
     $stmt = $db->prepare($sql);
@@ -88,6 +105,9 @@ if ($m === 'POST') {
     $b = body();
     if (!empty($b['archive']) && !empty($b['id'])) {
         archiveMember($db, $user, (int)$b['id'], $b['archive_reason'] ?? '');
+    }
+    if (!empty($b['restore']) && !empty($b['id'])) {
+        restoreMember($db, $user, (int)$b['id']);
     }
     foreach (['full_name', 'phone', 'plan'] as $field) {
         if (empty($b[$field])) respond(['error' => "Field '$field' is required."], 400);
@@ -132,6 +152,12 @@ if ($m === 'PUT' && $id) {
     $b = body();
     if (!empty($b['archive']) || (($b['status'] ?? '') === 'Archived')) {
         archiveMember($db, $user, $id, $b['archive_reason'] ?? '');
+    }
+    if (!empty($b['restore']) || (($b['status'] ?? '') === 'Active' && !empty($b['restore']))) {
+        restoreMember($db, $user, $id);
+    }
+    if (!empty($b['restore'])) {
+        restoreMember($db, $user, $id);
     }
     $check = $db->prepare('SELECT * FROM members WHERE id = ?');
     $check->execute([$id]);
