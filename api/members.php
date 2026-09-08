@@ -6,6 +6,10 @@ $db   = getDB();
 $id   = getId();
 $m    = method();
 
+try { $db->exec("ALTER TABLE members MODIFY status ENUM('Active','Expired','Pending','Suspended','Archived') NOT NULL DEFAULT 'Active'"); } catch (Throwable $e) {}
+try { $db->exec('ALTER TABLE members ADD COLUMN archive_reason TEXT NULL'); } catch (Throwable $e) {}
+try { $db->exec('ALTER TABLE members ADD COLUMN archived_at DATETIME NULL'); } catch (Throwable $e) {}
+
 function nextMemberCode(PDO $db): string {
     $last = $db->query('SELECT member_code FROM members ORDER BY id DESC LIMIT 1')->fetch();
     $next = 1;
@@ -15,14 +19,33 @@ function nextMemberCode(PDO $db): string {
     return 'MBR-' . str_pad((string)$next, 3, '0', STR_PAD_LEFT);
 }
 
+function archiveMember(PDO $db, array $user, int $id, string $reason): void {
+    $reason = trim($reason);
+    if ($reason === '') respond(['error' => 'Please enter a reason for archiving this member.'], 400);
+    $check = $db->prepare('SELECT * FROM members WHERE id = ?');
+    $check->execute([$id]);
+    $current = $check->fetch();
+    if (!$current) respond(['error' => 'Member not found.'], 404);
+    if ($current['status'] === 'Archived') respond(['error' => 'This member is already archived.'], 409);
+    $db->prepare('UPDATE members SET status = "Archived", archive_reason = ?, archived_at = NOW(), updated_at = NOW() WHERE id = ?')
+       ->execute([$reason, $id]);
+    logAction($db, $user['id'], "Member {$current['member_code']} ({$current['full_name']}) archived: $reason", 'danger');
+    respond(['success' => true]);
+}
+
 if ($m === 'GET' && !$id) {
     $q      = '%' . ($_GET['q'] ?? '') . '%';
     $plan   = $_GET['plan']   ?? '';
     $status = $_GET['status'] ?? '';
     $sql    = 'SELECT * FROM members WHERE (full_name LIKE ? OR member_code LIKE ? OR phone LIKE ?)';
     $params = [$q, $q, $q];
-    if ($plan)   { $sql .= ' AND plan = ?';   $params[] = $plan; }
-    if ($status) { $sql .= ' AND status = ?'; $params[] = $status; }
+    if ($status) {
+        $sql .= ' AND status = ?';
+        $params[] = $status;
+    } else {
+        $sql .= ' AND status <> "Archived"';
+    }
+    if ($plan) { $sql .= ' AND plan = ?'; $params[] = $plan; }
     $sql .= ' ORDER BY created_at DESC';
     $stmt = $db->prepare($sql);
     $stmt->execute($params);
@@ -40,6 +63,9 @@ if ($m === 'GET' && $id) {
 
 if ($m === 'POST') {
     $b = body();
+    if (!empty($b['archive']) && !empty($b['id'])) {
+        archiveMember($db, $user, (int)$b['id'], $b['archive_reason'] ?? '');
+    }
     foreach (['full_name', 'phone', 'plan'] as $field) {
         if (empty($b[$field])) respond(['error' => "Field '$field' is required."], 400);
     }
@@ -49,16 +75,9 @@ if ($m === 'POST') {
     $code = nextMemberCode($db);
     $stmt = $db->prepare('INSERT INTO members (member_code, full_name, phone, email, date_of_birth, gender, plan, status, emergency_contact, fitness_goal, medical_notes, joined_at) VALUES (?, ?, ?, ?, ?, ?, ?, "Active", ?, ?, ?, CURDATE())');
     $stmt->execute([
-        $code,
-        $b['full_name'],
-        $b['phone'],
-        $b['email'] ?? null,
-        $b['date_of_birth'] ?? null,
-        $b['gender'] ?? null,
-        $b['plan'],
-        $b['emergency_contact'] ?? null,
-        $b['fitness_goal'] ?? null,
-        $b['medical_notes'] ?? null,
+        $code, $b['full_name'], $b['phone'], $b['email'] ?? null, $b['date_of_birth'] ?? null,
+        $b['gender'] ?? null, $b['plan'], $b['emergency_contact'] ?? null,
+        $b['fitness_goal'] ?? null, $b['medical_notes'] ?? null,
     ]);
     logAction($db, $user['id'], "Member $code ({$b['full_name']}) registered", 'success');
     respond(['success' => true, 'member_code' => $code, 'id' => $db->lastInsertId()], 201);
@@ -66,18 +85,17 @@ if ($m === 'POST') {
 
 if ($m === 'PUT' && $id) {
     $b = body();
+    if (!empty($b['archive']) || (($b['status'] ?? '') === 'Archived')) {
+        archiveMember($db, $user, $id, $b['archive_reason'] ?? '');
+    }
     $check = $db->prepare('SELECT * FROM members WHERE id = ?');
     $check->execute([$id]);
     $current = $check->fetch();
     if (!$current) respond(['error' => 'Member not found.'], 404);
     $allowed = ['full_name','phone','email','date_of_birth','gender','plan','status','emergency_contact','fitness_goal','medical_notes','checkins'];
-    $sets = [];
-    $params = [];
+    $sets = []; $params = [];
     foreach ($allowed as $field) {
-        if (array_key_exists($field, $b)) {
-            $sets[] = "$field = ?";
-            $params[] = $b[$field];
-        }
+        if (array_key_exists($field, $b)) { $sets[] = "$field = ?"; $params[] = $b[$field]; }
     }
     if (!$sets) respond(['error' => 'No fields to update.'], 400);
     $params[] = $id;
@@ -88,20 +106,8 @@ if ($m === 'PUT' && $id) {
 }
 
 if ($m === 'DELETE' && $id) {
-    $stmt = $db->prepare('SELECT member_code, full_name FROM members WHERE id = ?');
-    $stmt->execute([$id]);
-    $row = $stmt->fetch();
-    if (!$row) respond(['error' => 'Member not found.'], 404);
-    $pay = $db->prepare('SELECT COUNT(*) FROM payments WHERE member_id = ?');
-    $pay->execute([$id]);
-    $ord = $db->prepare('SELECT COUNT(*) FROM orders WHERE member_id = ?');
-    $ord->execute([$id]);
-    if ((int)$pay->fetchColumn() > 0 || (int)$ord->fetchColumn() > 0) {
-        respond(['error' => 'This member has payments or orders, so they cannot be deleted. Suspend them instead.'], 409);
-    }
-    $db->prepare('DELETE FROM members WHERE id = ?')->execute([$id]);
-    logAction($db, $user['id'], "Member {$row['member_code']} ({$row['full_name']}) deleted", 'danger');
-    respond(['success' => true]);
+    $b = body();
+    archiveMember($db, $user, $id, $b['archive_reason'] ?? ($_GET['reason'] ?? ''));
 }
 
 respond(['error' => 'Method not allowed.'], 405);
