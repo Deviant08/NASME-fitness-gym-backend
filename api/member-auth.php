@@ -5,6 +5,7 @@
 
    POST ?action=login    → member login
    GET  ?action=me       → session check
+   GET  ?action=profile  → full profile (member + payments + orders)
    GET  ?action=payments → payment history
    GET  ?action=orders   → order history
    POST ?action=logout   → logout
@@ -70,6 +71,37 @@ if ($action === 'login' && $m === 'POST') {
 /* ── WHO AM I ─────────────────────────────────── */
 if ($action === 'me' && $m === 'GET') {
     respond(['member' => $_SESSION['member'] ?? null]);
+}
+
+/* ── FULL PROFILE (member + payments + orders) ── */
+if ($action === 'profile' && $m === 'GET') {
+    if (empty($_SESSION['member'])) respond(['error' => 'Not logged in.'], 401);
+
+    $db       = getDB();
+    $memberId = $_SESSION['member']['id'];
+
+    $payStmt = $db->prepare('
+        SELECT txn_code, plan, amount, method, status, paid_at
+        FROM payments WHERE member_id = ?
+        ORDER BY paid_at DESC
+    ');
+    $payStmt->execute([$memberId]);
+
+    $ordStmt = $db->prepare('
+        SELECT o.order_code, p.name AS product_name,
+               o.quantity, o.total, o.status, o.ordered_at
+        FROM orders o
+        JOIN products p ON o.product_id = p.id
+        WHERE o.member_id = ?
+        ORDER BY o.ordered_at DESC
+    ');
+    $ordStmt->execute([$memberId]);
+
+    respond([
+        'member'   => $_SESSION['member'],
+        'payments' => $payStmt->fetchAll(),
+        'orders'   => $ordStmt->fetchAll(),
+    ]);
 }
 
 /* ── PAYMENT HISTORY ──────────────────────────── */
