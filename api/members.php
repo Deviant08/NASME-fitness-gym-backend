@@ -155,4 +155,3 @@ if ($m === 'DELETE' && $id) {
 }
 
 respond(['error' => 'Method not allowed.'], 405);
-}
