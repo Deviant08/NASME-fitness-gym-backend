@@ -4,6 +4,9 @@ require_once __DIR__ . '/helpers.php';
 $action = $_GET['action'] ?? '';
 $m      = method();
 
+/** Streak only becomes active after this many consecutive check-in days. */
+const STREAK_MIN_DAYS = 5;
+
 function ensureCheckinsTable(PDO $db): void {
     $db->exec('CREATE TABLE IF NOT EXISTS checkins (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -21,8 +24,59 @@ function loadMemberRow(PDO $db, int $id): ?array {
     return $row ?: null;
 }
 
-function memberSessionPayload(array $member): array {
+/**
+ * Consecutive daily check-ins ending today or yesterday.
+ * Streak only "counts" (active) once consecutive days >= STREAK_MIN_DAYS (5).
+ */
+function computeStreak(PDO $db, int $memberId): array {
+    ensureCheckinsTable($db);
+    $stmt = $db->prepare('SELECT DISTINCT DATE(checked_in_at) AS d FROM checkins WHERE member_id = ? ORDER BY d DESC LIMIT 90');
+    $stmt->execute([$memberId]);
+    $dates = array_map(fn($r) => $r['d'], $stmt->fetchAll());
+
+    $consecutive = 0;
+    if ($dates) {
+        $today = new DateTime('today');
+        $cursor = clone $today;
+        // Allow streak to continue if last check-in was yesterday (not yet today)
+        $first = new DateTime($dates[0]);
+        $diffFirst = (int)$today->diff($first)->format('%r%a');
+        if ($diffFirst > 1) {
+            // Gap longer than 1 day — streak broken
+            $consecutive = 0;
+        } else {
+            if ($diffFirst === 1) {
+                // Last check-in was yesterday — start counting from yesterday
+                $cursor = clone $first;
+            }
+            foreach ($dates as $d) {
+                $day = new DateTime($d);
+                if ($day->format('Y-m-d') === $cursor->format('Y-m-d')) {
+                    $consecutive++;
+                    $cursor->modify('-1 day');
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    $active = $consecutive >= STREAK_MIN_DAYS;
     return [
+        'consecutive_days' => $consecutive,
+        'streak_active'    => $active,
+        // Displayed streak only after 5 days; before that show 0
+        'streak'           => $active ? $consecutive : 0,
+        'streak_threshold' => STREAK_MIN_DAYS,
+        'progress'         => min($consecutive, STREAK_MIN_DAYS),
+        'message'          => $active
+            ? ($consecutive . '-day streak')
+            : ('Streak starts after ' . STREAK_MIN_DAYS . ' days — ' . $consecutive . '/' . STREAK_MIN_DAYS),
+    ];
+}
+
+function memberSessionPayload(array $member, ?array $streak = null): array {
+    $payload = [
         'id'          => $member['id'],
         'member_code' => $member['member_code'],
         'full_name'   => $member['full_name'],
@@ -35,6 +89,10 @@ function memberSessionPayload(array $member): array {
         'phone'       => $member['phone'],
         'email'       => $member['email'] ?? null,
     ];
+    if ($streak !== null) {
+        $payload['streak'] = $streak;
+    }
+    return $payload;
 }
 
 if ($action === 'login' && $m === 'POST') {
@@ -61,7 +119,6 @@ if ($action === 'login' && $m === 'POST') {
         respond(['error' => 'Incorrect phone number. Please try again.'], 401);
     }
 
-    // Auto-expire if past expires_at
     if (($member['status'] ?? '') === 'Active' && !empty($member['expires_at']) && $member['expires_at'] < date('Y-m-d')) {
         $db->prepare('UPDATE members SET status = "Expired", updated_at = NOW() WHERE id = ?')->execute([$member['id']]);
         $member['status'] = 'Expired';
@@ -81,7 +138,8 @@ if ($action === 'login' && $m === 'POST') {
         respond(['error' => 'Your membership has expired. Please renew at the front desk.', 'expired' => true], 403);
     }
 
-    $_SESSION['member'] = memberSessionPayload($member);
+    $streak = computeStreak($db, (int)$member['id']);
+    $_SESSION['member'] = memberSessionPayload($member, $streak);
 
     logAction($db, null, "Member {$member['member_code']} ({$member['full_name']}) logged in", 'success');
     respond(['success' => true, 'member' => $_SESSION['member']]);
@@ -97,7 +155,9 @@ if ($action === 'profile' && $m === 'GET') {
     $memberId = (int)$_SESSION['member']['id'];
     $member   = loadMemberRow($db, $memberId);
     if (!$member) respond(['error' => 'Member not found.'], 404);
-    $_SESSION['member'] = memberSessionPayload($member);
+
+    $streak = computeStreak($db, $memberId);
+    $_SESSION['member'] = memberSessionPayload($member, $streak);
 
     $payStmt = $db->prepare('SELECT txn_code, plan, amount, method, status, paid_at FROM payments WHERE member_id = ? ORDER BY paid_at DESC');
     $payStmt->execute([$memberId]);
@@ -110,10 +170,10 @@ if ($action === 'profile' && $m === 'GET') {
         'member'   => $_SESSION['member'],
         'payments' => $payStmt->fetchAll(),
         'checkins' => $cinStmt->fetchAll(),
+        'streak'   => $streak,
     ]);
 }
 
-/** Member self check-in */
 if ($action === 'checkin' && $m === 'POST') {
     if (empty($_SESSION['member'])) respond(['error' => 'Not logged in.'], 401);
     $db       = getDB();
@@ -132,7 +192,6 @@ if ($action === 'checkin' && $m === 'POST') {
 
     ensureCheckinsTable($db);
 
-    // One check-in per calendar day
     $dup = $db->prepare('SELECT id FROM checkins WHERE member_id = ? AND DATE(checked_in_at) = CURDATE() LIMIT 1');
     $dup->execute([$memberId]);
     if ($dup->fetch()) {
@@ -143,13 +202,22 @@ if ($action === 'checkin' && $m === 'POST') {
     $db->prepare('UPDATE members SET checkins = COALESCE(checkins, 0) + 1, updated_at = NOW() WHERE id = ?')->execute([$memberId]);
 
     $member = loadMemberRow($db, $memberId);
-    $_SESSION['member'] = memberSessionPayload($member);
+    $streak = computeStreak($db, $memberId);
+    $_SESSION['member'] = memberSessionPayload($member, $streak);
+
+    $msg = 'Checked in successfully.';
+    if ($streak['streak_active']) {
+        $msg .= ' ' . $streak['streak'] . '-day streak!';
+    } else {
+        $msg .= ' Streak builds after 5 consecutive days (' . $streak['progress'] . '/5).';
+    }
 
     logAction($db, null, "Member {$member['member_code']} ({$member['full_name']}) checked in", 'success');
     respond([
-        'success'  => true,
-        'message'  => 'Checked in successfully.',
-        'member'   => $_SESSION['member'],
+        'success'       => true,
+        'message'       => $msg,
+        'member'        => $_SESSION['member'],
+        'streak'        => $streak,
         'checked_in_at' => date('Y-m-d H:i:s'),
     ]);
 }
