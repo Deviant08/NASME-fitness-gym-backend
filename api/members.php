@@ -22,6 +22,7 @@ foreach ([
     'ALTER TABLE members ADD COLUMN previous_gym_experience VARCHAR(10) NULL',
     'ALTER TABLE members ADD COLUMN start_date DATE NULL',
     'ALTER TABLE members ADD COLUMN payment_info VARCHAR(120) NULL',
+    'ALTER TABLE members ADD COLUMN expires_at DATE NULL',
 ] as $sql) {
     try { $db->exec($sql); } catch (Throwable $e) {}
 }
@@ -35,6 +36,28 @@ function nextMemberCode(PDO $db): string {
     return 'MBR-' . str_pad((string)$next, 3, '0', STR_PAD_LEFT);
 }
 
+/** Compute subscription end date from plan + start date. */
+function computeExpiresAt(?string $plan, ?string $startDate): ?string {
+    if (!$startDate) $startDate = date('Y-m-d');
+    $plan = strtolower(trim((string)$plan));
+    try {
+        $dt = new DateTime($startDate);
+    } catch (Throwable $e) {
+        $dt = new DateTime('today');
+    }
+    if (str_contains($plan, 'day')) {
+        $dt->modify('+1 day');
+    } elseif (str_contains($plan, 'week')) {
+        $dt->modify('+7 days');
+    } elseif (str_contains($plan, 'year')) {
+        $dt->modify('+1 year');
+    } else {
+        // Monthly / default
+        $dt->modify('+1 month');
+    }
+    return $dt->format('Y-m-d');
+}
+
 function memberFields(): array {
     return [
         'full_name','phone','email','age','gender','address',
@@ -42,7 +65,7 @@ function memberFields(): array {
         'has_medical_condition','medical_notes',
         'has_previous_injury','previous_injury_details','taking_medication',
         'fitness_goal','previous_gym_experience',
-        'plan','start_date','joined_at','payment_info','status','checkins','date_of_birth',
+        'plan','start_date','joined_at','payment_info','status','checkins','date_of_birth','expires_at',
     ];
 }
 
@@ -84,12 +107,24 @@ if ($m === 'GET' && !$id) {
     } elseif (!$status) {
         $sql .= ' AND status <> "Archived"';
     }
-    // status=all → no status filter
     if ($plan) { $sql .= ' AND plan = ?'; $params[] = $plan; }
     $sql .= ' ORDER BY created_at DESC';
     $stmt = $db->prepare($sql);
     $stmt->execute($params);
     $rows = $stmt->fetchAll();
+    // Auto-flag expired in response if expires_at has passed and still Active
+    $today = date('Y-m-d');
+    foreach ($rows as &$row) {
+        if (($row['status'] ?? '') === 'Active' && !empty($row['expires_at']) && $row['expires_at'] < $today) {
+            // Soft-mark in DB for consistency
+            try {
+                $db->prepare('UPDATE members SET status = "Expired", updated_at = NOW() WHERE id = ? AND status = "Active"')
+                   ->execute([$row['id']]);
+                $row['status'] = 'Expired';
+            } catch (Throwable $e) {}
+        }
+    }
+    unset($row);
     respond(['data' => $rows, 'total' => count($rows)]);
 }
 
@@ -115,10 +150,14 @@ if ($m === 'POST') {
     $dup = $db->prepare('SELECT id FROM members WHERE full_name = ? AND phone = ?');
     $dup->execute([$b['full_name'], $b['phone']]);
     if ($dup->fetch()) respond(['error' => 'A member with this name and phone number already exists.'], 409);
-    $code = nextMemberCode($db);
-    $start = $b['start_date'] ?? date('Y-m-d');
+    $code   = nextMemberCode($db);
+    $start  = $b['start_date'] ?? date('Y-m-d');
+    $status = $b['status'] ?? 'Active';
+    $allowedStatus = ['Active','Expired','Pending','Suspended'];
+    if (!in_array($status, $allowedStatus, true)) $status = 'Active';
+    $expires = $b['expires_at'] ?? computeExpiresAt($b['plan'], $start);
     $emergency = $b['emergency_contact'] ?? trim(($b['emergency_name'] ?? '') . ' ' . ($b['emergency_phone'] ?? ''));
-    $stmt = $db->prepare('INSERT INTO members (member_code, full_name, phone, email, age, gender, address, date_of_birth, plan, status, emergency_contact, emergency_name, emergency_phone, emergency_relationship, has_medical_condition, medical_notes, has_previous_injury, previous_injury_details, taking_medication, fitness_goal, previous_gym_experience, start_date, payment_info, joined_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, "Active", ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+    $stmt = $db->prepare('INSERT INTO members (member_code, full_name, phone, email, age, gender, address, date_of_birth, plan, status, emergency_contact, emergency_name, emergency_phone, emergency_relationship, has_medical_condition, medical_notes, has_previous_injury, previous_injury_details, taking_medication, fitness_goal, previous_gym_experience, start_date, expires_at, payment_info, joined_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
     $stmt->execute([
         $code,
         $b['full_name'],
@@ -129,6 +168,7 @@ if ($m === 'POST') {
         $b['address'] ?? null,
         $b['date_of_birth'] ?? null,
         $b['plan'],
+        $status,
         $emergency ?: null,
         $b['emergency_name'] ?? null,
         $b['emergency_phone'] ?? null,
@@ -141,20 +181,18 @@ if ($m === 'POST') {
         $b['fitness_goal'] ?? null,
         $b['previous_gym_experience'] ?? null,
         $start,
+        $expires,
         $b['payment_info'] ?? null,
         $start,
     ]);
     logAction($db, $user['id'], "Member $code ({$b['full_name']}) registered", 'success');
-    respond(['success' => true, 'member_code' => $code, 'id' => $db->lastInsertId()], 201);
+    respond(['success' => true, 'member_code' => $code, 'id' => $db->lastInsertId(), 'expires_at' => $expires], 201);
 }
 
 if ($m === 'PUT' && $id) {
     $b = body();
     if (!empty($b['archive']) || (($b['status'] ?? '') === 'Archived')) {
         archiveMember($db, $user, $id, $b['archive_reason'] ?? '');
-    }
-    if (!empty($b['restore']) || (($b['status'] ?? '') === 'Active' && !empty($b['restore']))) {
-        restoreMember($db, $user, $id);
     }
     if (!empty($b['restore'])) {
         restoreMember($db, $user, $id);
@@ -163,9 +201,24 @@ if ($m === 'PUT' && $id) {
     $check->execute([$id]);
     $current = $check->fetch();
     if (!$current) respond(['error' => 'Member not found.'], 404);
+
+    // Recalculate expires_at when plan or start_date changes (unless explicit expires_at sent)
+    if (!array_key_exists('expires_at', $b) && (array_key_exists('plan', $b) || array_key_exists('start_date', $b))) {
+        $plan  = $b['plan'] ?? $current['plan'];
+        $start = $b['start_date'] ?? $current['start_date'] ?? date('Y-m-d');
+        $b['expires_at'] = computeExpiresAt($plan, $start);
+    }
+
     $sets = []; $params = [];
     foreach (memberFields() as $field) {
-        if (array_key_exists($field, $b)) { $sets[] = "$field = ?"; $params[] = $b[$field]; }
+        if (array_key_exists($field, $b)) {
+            if ($field === 'status') {
+                $allowed = ['Active','Expired','Pending','Suspended','Archived'];
+                if (!in_array($b['status'], $allowed, true)) continue;
+            }
+            $sets[] = "$field = ?";
+            $params[] = $b[$field];
+        }
     }
     if (!$sets) respond(['error' => 'No fields to update.'], 400);
     $params[] = $id;
