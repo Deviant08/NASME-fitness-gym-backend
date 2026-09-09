@@ -36,8 +36,14 @@ function nextMemberCode(PDO $db): string {
     return 'MBR-' . str_pad((string)$next, 3, '0', STR_PAD_LEFT);
 }
 
-/** Compute subscription end date from plan + start date. */
-function computeExpiresAt(?string $plan, ?string $startDate): ?string {
+/**
+ * Subscription end date from registration/start date + plan.
+ * Daily  → same day as start (valid that day only)
+ * Weekly → start + 7 days
+ * Monthly → start + 1 month
+ * Yearly → start + 1 year
+ */
+function computeExpiresAt(?string $plan, ?string $startDate): string {
     if (!$startDate) $startDate = date('Y-m-d');
     $plan = strtolower(trim((string)$plan));
     try {
@@ -46,8 +52,10 @@ function computeExpiresAt(?string $plan, ?string $startDate): ?string {
         $dt = new DateTime('today');
     }
     if (str_contains($plan, 'day')) {
-        $dt->modify('+1 day');
-    } elseif (str_contains($plan, 'week')) {
+        // Daily plan ends on the registration/start day itself
+        return $dt->format('Y-m-d');
+    }
+    if (str_contains($plan, 'week')) {
         $dt->modify('+7 days');
     } elseif (str_contains($plan, 'year')) {
         $dt->modify('+1 year');
@@ -112,11 +120,20 @@ if ($m === 'GET' && !$id) {
     $stmt = $db->prepare($sql);
     $stmt->execute($params);
     $rows = $stmt->fetchAll();
-    // Auto-flag expired in response if expires_at has passed and still Active
     $today = date('Y-m-d');
     foreach ($rows as &$row) {
+        // Backfill missing expires_at from plan + start
+        if (empty($row['expires_at']) && !empty($row['plan'])) {
+            $start = $row['start_date'] ?? $row['joined_at'] ?? $today;
+            $computed = computeExpiresAt($row['plan'], $start ? substr((string)$start, 0, 10) : $today);
+            try {
+                $db->prepare('UPDATE members SET expires_at = ? WHERE id = ?')->execute([$computed, $row['id']]);
+                $row['expires_at'] = $computed;
+            } catch (Throwable $e) {
+                $row['expires_at'] = $computed;
+            }
+        }
         if (($row['status'] ?? '') === 'Active' && !empty($row['expires_at']) && $row['expires_at'] < $today) {
-            // Soft-mark in DB for consistency
             try {
                 $db->prepare('UPDATE members SET status = "Expired", updated_at = NOW() WHERE id = ? AND status = "Active"')
                    ->execute([$row['id']]);
@@ -155,7 +172,8 @@ if ($m === 'POST') {
     $status = $b['status'] ?? 'Active';
     $allowedStatus = ['Active','Expired','Pending','Suspended'];
     if (!in_array($status, $allowedStatus, true)) $status = 'Active';
-    $expires = $b['expires_at'] ?? computeExpiresAt($b['plan'], $start);
+    // Always derive end date from plan + registration/start date (staff can still override expires_at)
+    $expires = !empty($b['expires_at']) ? $b['expires_at'] : computeExpiresAt($b['plan'], $start);
     $emergency = $b['emergency_contact'] ?? trim(($b['emergency_name'] ?? '') . ' ' . ($b['emergency_phone'] ?? ''));
     $stmt = $db->prepare('INSERT INTO members (member_code, full_name, phone, email, age, gender, address, date_of_birth, plan, status, emergency_contact, emergency_name, emergency_phone, emergency_relationship, has_medical_condition, medical_notes, has_previous_injury, previous_injury_details, taking_medication, fitness_goal, previous_gym_experience, start_date, expires_at, payment_info, joined_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
     $stmt->execute([
@@ -186,7 +204,7 @@ if ($m === 'POST') {
         $start,
     ]);
     logAction($db, $user['id'], "Member $code ({$b['full_name']}) registered", 'success');
-    respond(['success' => true, 'member_code' => $code, 'id' => $db->lastInsertId(), 'expires_at' => $expires], 201);
+    respond(['success' => true, 'member_code' => $code, 'id' => $db->lastInsertId(), 'expires_at' => $expires, 'start_date' => $start], 201);
 }
 
 if ($m === 'PUT' && $id) {
@@ -202,7 +220,7 @@ if ($m === 'PUT' && $id) {
     $current = $check->fetch();
     if (!$current) respond(['error' => 'Member not found.'], 404);
 
-    // Recalculate expires_at when plan or start_date changes (unless explicit expires_at sent)
+    // Recalculate expires from plan + start when either changes (unless expires_at explicitly sent)
     if (!array_key_exists('expires_at', $b) && (array_key_exists('plan', $b) || array_key_exists('start_date', $b))) {
         $plan  = $b['plan'] ?? $current['plan'];
         $start = $b['start_date'] ?? $current['start_date'] ?? date('Y-m-d');
