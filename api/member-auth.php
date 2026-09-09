@@ -17,6 +17,70 @@ function ensureCheckinsTable(PDO $db): void {
     )');
 }
 
+/**
+ * Subscription end date from registration/start date + plan.
+ * Daily  → same day as start (valid that day only)
+ * Weekly → start + 7 days
+ * Monthly → start + 1 month
+ * Yearly → start + 1 year
+ * (Same logic as admin members.php)
+ */
+function computeExpiresAt(?string $plan, ?string $startDate): string {
+    if (!$startDate) $startDate = date('Y-m-d');
+    $plan = strtolower(trim((string)$plan));
+    try {
+        $dt = new DateTime($startDate);
+    } catch (Throwable $e) {
+        $dt = new DateTime('today');
+    }
+    if (str_contains($plan, 'day')) {
+        // Daily plan ends on the registration/start day itself
+        return $dt->format('Y-m-d');
+    }
+    if (str_contains($plan, 'week')) {
+        $dt->modify('+7 days');
+    } elseif (str_contains($plan, 'year')) {
+        $dt->modify('+1 year');
+    } else {
+        // Monthly / default
+        $dt->modify('+1 month');
+    }
+    return $dt->format('Y-m-d');
+}
+
+/**
+ * Ensure expires_at is set (backfill from plan + start) and flip Active → Expired when past.
+ * Returns the (possibly updated) member row.
+ */
+function ensureMemberExpiry(PDO $db, array $member): array {
+    $today = date('Y-m-d');
+    $id = (int)$member['id'];
+
+    // Backfill missing expires_at from plan + start/joined date
+    if (empty($member['expires_at']) && !empty($member['plan'])) {
+        $start = $member['start_date'] ?? $member['joined_at'] ?? $today;
+        $start = $start ? substr((string)$start, 0, 10) : $today;
+        $computed = computeExpiresAt($member['plan'], $start);
+        try {
+            $db->prepare('UPDATE members SET expires_at = ? WHERE id = ?')->execute([$computed, $id]);
+            $member['expires_at'] = $computed;
+        } catch (Throwable $e) {
+            $member['expires_at'] = $computed;
+        }
+    }
+
+    // Auto-expire if past end date
+    if (($member['status'] ?? '') === 'Active' && !empty($member['expires_at']) && $member['expires_at'] < $today) {
+        try {
+            $db->prepare('UPDATE members SET status = "Expired", updated_at = NOW() WHERE id = ? AND status = "Active"')
+               ->execute([$id]);
+            $member['status'] = 'Expired';
+        } catch (Throwable $e) {}
+    }
+
+    return $member;
+}
+
 function loadMemberRow(PDO $db, int $id): ?array {
     $stmt = $db->prepare('SELECT * FROM members WHERE id = ?');
     $stmt->execute([$id]);
@@ -119,10 +183,8 @@ if ($action === 'login' && $m === 'POST') {
         respond(['error' => 'Incorrect phone number. Please try again.'], 401);
     }
 
-    if (($member['status'] ?? '') === 'Active' && !empty($member['expires_at']) && $member['expires_at'] < date('Y-m-d')) {
-        $db->prepare('UPDATE members SET status = "Expired", updated_at = NOW() WHERE id = ?')->execute([$member['id']]);
-        $member['status'] = 'Expired';
-    }
+    // Backfill expires_at + auto-expire if past (same rules as admin)
+    $member = ensureMemberExpiry($db, $member);
 
     if ($member['status'] === 'Archived') {
         $reason = $member['archive_reason'] ?? '';
@@ -156,6 +218,9 @@ if ($action === 'profile' && $m === 'GET') {
     $member   = loadMemberRow($db, $memberId);
     if (!$member) respond(['error' => 'Member not found.'], 404);
 
+    // Backfill expires_at so member portal always shows the correct end date
+    $member = ensureMemberExpiry($db, $member);
+
     $streak = computeStreak($db, $memberId);
     $_SESSION['member'] = memberSessionPayload($member, $streak);
 
@@ -181,10 +246,8 @@ if ($action === 'checkin' && $m === 'POST') {
     $member   = loadMemberRow($db, $memberId);
     if (!$member) respond(['error' => 'Member not found.'], 404);
 
-    if (($member['status'] ?? '') === 'Active' && !empty($member['expires_at']) && $member['expires_at'] < date('Y-m-d')) {
-        $db->prepare('UPDATE members SET status = "Expired", updated_at = NOW() WHERE id = ?')->execute([$memberId]);
-        $member['status'] = 'Expired';
-    }
+    // Backfill expires_at + auto-expire before allowing check-in
+    $member = ensureMemberExpiry($db, $member);
 
     if (in_array($member['status'], ['Archived', 'Suspended', 'Expired', 'Pending'], true)) {
         respond(['error' => 'You cannot check in while membership status is ' . $member['status'] . '.'], 403);
@@ -202,6 +265,7 @@ if ($action === 'checkin' && $m === 'POST') {
     $db->prepare('UPDATE members SET checkins = COALESCE(checkins, 0) + 1, updated_at = NOW() WHERE id = ?')->execute([$memberId]);
 
     $member = loadMemberRow($db, $memberId);
+    $member = ensureMemberExpiry($db, $member);
     $streak = computeStreak($db, $memberId);
     $_SESSION['member'] = memberSessionPayload($member, $streak);
 
